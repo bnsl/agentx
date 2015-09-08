@@ -131,7 +131,6 @@ func unmarshalResponse(b []byte) (*agentx_Response_PDU, error) {
 	res := &agentx_Response_PDU{}
 	
 	buf := bytes.NewBuffer(b)
-	log.Printf("% x", b)
 	
 	err := binary.Read(buf, binary.LittleEndian, &res.res_sysUpTime)
 	if err != nil {
@@ -175,8 +174,6 @@ func unmarshalHeader(b []byte) (*Header, error) {
 	if err != nil {
 		return nil, err
 	}
-	
-	log.Printf("hdr: %v", h)
 	
 	return &h, nil
 }
@@ -355,16 +352,15 @@ func unmarshalGetNext(b []byte) (*agentx_Get_PDU, error) {
 	for {
 		err := binary.Read(buf, binary.LittleEndian, c)
 		if err != nil {
-			log.Printf("Error: %v", err)
 			if err == io.EOF {
 				return pdu, nil
 			}
+			log.Printf("Error: %v", err)
 			return nil, err
 		}
 		if (c[0] == 0) {
 			return pdu, nil
 		}
-		log.Printf("HDR: %v", c)
 		j := make(OID, c[0])
 		err = binary.Read(buf, binary.LittleEndian, j)
 		if err != nil {
@@ -384,7 +380,6 @@ func unmarshalGetNext(b []byte) (*agentx_Get_PDU, error) {
 			o[4] = uint32(c[1])
 
 			for i := uint8(0); i < c[0]; i++ {
-				log.Printf("")
 				o[i+5] = j[i]
 			}
 		} else {

@@ -24,8 +24,12 @@ type Client struct {
 	SessionID	uint32
 	resultTo	map[uint32]chan interface{}
 	rwlock		sync.Mutex
-	stop		chan bool
 	trees		map[string]*OIDTree
+	
+	closing		bool
+	rxDied		chan bool
+	plsDie		chan bool
+	Closed		chan bool
 }
 
 func (c *Client) loop() {
@@ -34,10 +38,13 @@ func (c *Client) loop() {
 		for {
 			buf := make([]byte, 1500)
 			l, err := c.conn.Read(buf)
-			log.Printf("RX: %d bytes", l)
-			log.Printf("RX: % v", buf[0:l])
+//			log.Printf("RX: %d bytes", l)
+//			log.Printf("RX: % v", buf[0:l])
 			if err != nil {
-				log.Printf("RX chan exits, sadfaec: %v", err)
+				if !c.closing {
+					log.Printf("RX chan exits, sadfaec: %v", err)
+				}
+				close(c.rxDied)
 				return
 			}
 			h, err := unmarshalHeader(buf)
@@ -52,7 +59,6 @@ func (c *Client) loop() {
 						log.Printf("ERROR: %v", err)
 						return
 					}
-					log.Printf("GET: %v", r)
 
 					vb := NewVarBind()
 				
@@ -61,13 +67,11 @@ func (c *Client) loop() {
 						var ok bool
 						var o *OIDEntry
 				
-						log.Printf("check for: %v", l)
 						for i := len(l); i > 6; i-- {
 							if t, ok = c.trees[l[:i].String()]; ok {
 								break
 							}
 						}
-						log.Printf("t := %v", t)
 						if (t != nil) {
 							o, err = t.Get(l)
 						}
@@ -80,19 +84,15 @@ func (c *Client) loop() {
 						vb.Add(o.Value.Type(), l, o.Value)
 					}
 				
-					log.Printf("vb == %v", vb.entries)
-
 					c.sendResponse(*h, vb)
 				}()
 			case h.Type == agentx_GetNext:
 				go func() {
-					log.Printf("GET NEXT")
 					r, err := unmarshalGetNext(buf[20:l])
 					if err != nil {
 						log.Printf("ERROR: %v", err)
 						return
 					}
-					log.Printf("GET: %v", r)
 
 					vb := NewVarBind()
 				
@@ -101,13 +101,12 @@ func (c *Client) loop() {
 						var ok bool
 						var o *OIDEntry
 				
-						log.Printf("check for: %v", l)
 						for i := len(l); i > 6; i-- {
 							if t, ok = c.trees[l[:i].String()]; ok {
 								break
 							}
 						}
-						log.Printf("t := %v", t)
+
 						if (t != nil) {
 							o, err = t.Next(l)
 						}
@@ -120,8 +119,6 @@ func (c *Client) loop() {
 						vb.Add(o.Value.Type(), o.OID, o.Value)
 					}
 				
-					log.Printf("vb == %v", vb.entries)
-
 					c.sendResponse(*h, vb)
 				}()
 			case h.Type == agentx_Response:
@@ -142,7 +139,6 @@ func (c *Client) loop() {
 							rep <- err
 							continue
 						}
-						log.Printf("?")
 						rep <- r
 						continue
 					}
@@ -167,7 +163,6 @@ func (c *Client) loop() {
 			h.TransactionID = 0
 			h.Type = r.pkttype
 			newlen := int(math.Ceil(float64(r.payload.Len())/4.0) * 4)
-			log.Printf("newlen: %d / %d", r.payload.Len(), newlen)
 
 			for i := r.payload.Len(); i < newlen; i++ {
 				r.payload.Write([]byte{0})
@@ -177,15 +172,23 @@ func (c *Client) loop() {
 			b := new(bytes.Buffer)
 			h.Marshal(b)
 			b.Write(r.payload.Bytes())
-			log.Printf("TX: % v", b.Bytes())
 			l, err := c.conn.Write(b.Bytes())
 			if err != nil {
 				log.Printf("Error: %v", err)
 			}
-			log.Printf("TX bytes sent: %d", l)
-		case _, open := <- c.stop:
+			if l != b.Len() {
+				log.Printf("Error, only send %d of %d bytes", l, b.Len)
+			}
+		case _, open := <- c.plsDie:
 			if !open {
 				c.conn.Close()
+				close(c.Closed)
+				return
+			}
+		case _, open := <- c.rxDied:
+			if !open {
+				c.conn.Close()
+				close(c.Closed)
 				return
 			}
 		}
@@ -204,8 +207,6 @@ func (c *Client) send(ty AgentXPDUType, buf *bytes.Buffer) (interface{}, error) 
 		return nil, err
 	}
 
-	log.Printf("r: % v", rep)
-	
 	return rep, nil
 }
 
@@ -218,7 +219,6 @@ func (c *Client) sendResponse(h Header, vb *VarBind) {
 	pdu.marshal(payload)
 
 	newlen := int(math.Ceil(float64(payload.Len())/4.0) * 4)
-	log.Printf("newlen: %d / %d", payload.Len(), newlen)
 
 	for i := payload.Len(); i < newlen; i++ {
 		payload.Write([]byte{0})
@@ -228,16 +228,18 @@ func (c *Client) sendResponse(h Header, vb *VarBind) {
 	b := new(bytes.Buffer)
 	h.Marshal(b)
 	b.Write(payload.Bytes())
-	log.Printf("TX: % v", b.Bytes())
 	l, err := c.conn.Write(b.Bytes())
 	if err != nil {
 		log.Printf("Error: %v", err)
 	}
-	log.Printf("TX bytes sent: %d", l)
-	
+	if l != b.Len() {
+		log.Printf("Error, only sent %d bytes of %d", l, b.Len())
+	}
 }
 
 func (c *Client) Close() {
+	c.closing = true
+
 	req := agentx_Close_PDU{}
 
 	req.reason = agentxCloseReason_Shutdown
@@ -250,13 +252,20 @@ func (c *Client) Close() {
 		return
 	}
 
-	if res, ok := rep.(*agentx_Response_PDU); ok {
-		log.Printf("Got response: %v", res)
-	} else {
+	if _, ok := rep.(*agentx_Response_PDU); !ok {
 		log.Printf("Type passed back not agentx_Response_PDU or error")
 	}
 
-	close(c.stop)
+	close(c.plsDie)
+	
+	for {
+		select {
+		case _, open := <- c.Closed:
+			if !open {
+				return
+			}
+		}
+	}
 }
 
 func (c *Client) sendOpen() error {
@@ -276,7 +285,6 @@ func (c *Client) sendOpen() error {
 	}
 
 	if res, ok := rep.(*agentx_Response_PDU); ok {
-		log.Printf("Got response: %v", res)
 		c.SessionID = res.header.SessionID
 	} else {
 		log.Printf("Type passed back not agentx_Response_PDU or error")
@@ -302,12 +310,10 @@ func (c *Client) Register(base OID, oidtree *OIDTree) error {
 	}
 
 	if res, ok := rep.(*agentx_Response_PDU); ok {
-		log.Printf("Got response: %v", res)
 		c.SessionID = res.header.SessionID
 	} else {
 		log.Printf("Type passed back not agentx_Response_PDU or error")
-		c.conn.Close()
-		return ErrOpenFailed
+		return ErrRegisterFailed
 	}
 	
 	c.rwlock.Lock()
@@ -319,7 +325,7 @@ func (c *Client) Register(base OID, oidtree *OIDTree) error {
 }
 
 func newClient() (*Client) {
-	return &Client{submit: make(chan clientRequest), resultTo: make(map[uint32]chan interface{}), stop: make(chan bool), trees: make(map[string]*OIDTree), started: time.Now()}
+	return &Client{submit: make(chan clientRequest), resultTo: make(map[uint32]chan interface{}), plsDie: make(chan bool), Closed: make(chan bool), rxDied: make(chan bool), trees: make(map[string]*OIDTree), started: time.Now()}
 }
 
 func ConnectAndServe(netw string, address string, oid *OID) (*Client, error) {
@@ -333,7 +339,6 @@ func ConnectAndServe(netw string, address string, oid *OID) (*Client, error) {
 
 	go client.loop()
 
-	log.Printf("Sending Open")
 	err = client.sendOpen()
 	if err != nil {
 		return nil, err

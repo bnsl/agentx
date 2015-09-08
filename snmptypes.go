@@ -4,7 +4,6 @@ import (
 	"sync/atomic"
 	"bytes"
 	"encoding/binary"
-	"log"
 )
 
 type SNMPValue interface {
@@ -28,7 +27,6 @@ func (c *Counter64) Inc(v uint64) {
 }
 
 func (c *Counter64) MarshalAgentX(buf *bytes.Buffer) error {
-	log.Printf("OH HERRO")
 	return binary.Write(buf, binary.LittleEndian, c)
 }
 

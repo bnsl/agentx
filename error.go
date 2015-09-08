@@ -26,6 +26,7 @@ const (
 
 var (
 	ErrOpenFailed								= errors.New("Open failed.")
+	ErrRegisterFailed							= errors.New("Register failed.")
 )
 
 func (e agentXError) Error() string {

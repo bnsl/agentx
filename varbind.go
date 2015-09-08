@@ -2,7 +2,6 @@ package agentx
 
 import (
 	"sync"
-	"log"
 	"bytes"
 	"encoding/binary"
 )
@@ -63,8 +62,6 @@ func (vb *VarBind) Add(typ varBindType, oid OID, data SNMPValue) {
 	vb.lock.Lock()
 	defer vb.lock.Unlock()
 
-	log.Printf("Adding VB entry: %v, %v, %v", typ, oid, data)
-	
 	vb.entries = append(vb.entries, VarBindEntry{typ, oid, data})
 }
 

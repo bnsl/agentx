@@ -23,7 +23,7 @@ type Client struct {
 	PacketID	uint32
 	SessionID	uint32
 	resultTo	map[uint32]chan interface{}
-	rwlock		sync.Mutex
+	rwlock		sync.RWMutex
 	trees		map[string]*OIDTree
 	
 	closing		bool
@@ -67,11 +67,15 @@ func (c *Client) loop() {
 						var ok bool
 						var o *OIDEntry
 				
+						c.rwlock.RLock()
 						for i := len(l); i > 6; i-- {
 							if t, ok = c.trees[l[:i].String()]; ok {
 								break
 							}
 						}
+
+						c.rwlock.RUnlock()
+
 						if (t != nil) {
 							o, err = t.Get(l)
 						}
@@ -101,11 +105,13 @@ func (c *Client) loop() {
 						var ok bool
 						var o *OIDEntry
 				
+						c.rwlock.RLock()
 						for i := len(l); i > 6; i-- {
 							if t, ok = c.trees[l[:i].String()]; ok {
 								break
 							}
 						}
+						c.rwlock.RUnlock()
 
 						if (t != nil) {
 							o, err = t.Next(l)
